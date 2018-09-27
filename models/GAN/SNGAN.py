@@ -1,5 +1,5 @@
 import torch.nn as nn
-from variational_optimizers.utils.SNlayers import SNConv2d, SNLinear
+from Variational_optimizer.utils.SNlayers import SNConv2d, SNLinear
 
 class _netG(nn.Module):
     def __init__(self, nz, nc, ngf):

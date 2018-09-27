@@ -1,3 +1,2 @@
-# Variational optimizer
-
-Experiments on using Variational Optimizers on DNNs
+# variational-optimizers
+Experiments on Using Variational Optimizers on DNNs

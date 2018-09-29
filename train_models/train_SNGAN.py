@@ -20,7 +20,8 @@ from Variational_optimizer.model_utils.weight_filler import weight_filler
 from Variational_optimizer.data_utils.logg import get_save_path
 from Variational_optimizer.data_utils.create_gif import create_gif
 from Variational_optimizer.varoptim.vadam import VAdam
-
+#from Variational_optimizer.varoptim.vadam_1 import VAdam
+import csv
 
 parser = argparse.ArgumentParser(description='train SNDCGAN model')
 parser.add_argument('--cuda', default=True, action='store_true', help='enables cuda')
@@ -29,10 +30,12 @@ parser.add_argument('--manualSeed', type=int, help='manual seed')
 parser.add_argument('--n_dis', type=int, default=1, help='discriminator critic iters')
 parser.add_argument('--nz', type=int, default=128, help='dimention of lantent noise')
 parser.add_argument('--batchsize', type=int, default=64, help='training batch size')
-parser.add_argument('--max_iter', type=int, default=1, help='Maximum training iterations')
+parser.add_argument('--max_iter', type=int, default=200, help='Maximum training iterations')
 parser.add_argument('--optim', type=str, default='VAdam', help='Optimizer [Adam, VAdam]')
 opt = parser.parse_args()
 print(opt)
+
+print(torch.__version__)
 
 if opt.optim == 'Adam':
     model_name = "SNGAN_Adam"
@@ -41,7 +44,8 @@ elif opt.optim =='VAdam':
 else:
     raise ValueError("Unknown optimizer name. Please choose from ['Adam', 'VAdam']")
 
-save_model_path, save_result_path, asset_path, data_path = get_save_path(model_name)
+save_model_path, save_result_path, asset_path, data_path = get_save_path(model_name,
+                                                                         overwrite=True)
 print("All data is saved at :" ,save_model_path)
 
 dataset = datasets.CIFAR10(root=data_path, download=True,
@@ -100,9 +104,14 @@ elif opt.optim == 'VAdam':
                        prior_precision=1.0, init_precision=1.0, train_batch_size=len(dataloader.dataset))
     optimizerSND = VAdam(SND.parameters(), lr=0.0002, betas=(0.5, 0.999),
                          prior_precision=1.0, init_precision=1.0, train_batch_size=len(dataloader.dataset))
-
+print("Number of data points ",len(dataloader.dataset))
 print("Number of Generator Parameter", len(list(G.parameters())))
 print("Number of Discriminator Parameter", len(list(SND.parameters())))
+
+# Error data
+Gen_err = []
+Dis_err = []
+
 start_time  = time()
 
 for epoch in range(opt.max_iter):
@@ -139,8 +148,20 @@ for epoch in range(opt.max_iter):
         D_G_z1 = output.data.mean()
         #grad_penal = gradient_penalty(inputv.data, SND)
         errD = errD_real + errD_fake #+ grad_penal*10.0
-        errD.backward()
-        optimizerSND.step()
+
+        if opt.optim == 'VAdam':
+            def closureSND():
+                optimizerSND.zero_grad()
+                errD_real = torch.mean(F.softplus(-output))
+                errD_fake = torch.mean(F.softplus(output))
+                errD = errD_real + errD_fake
+                errD.backward(retain_graph=True)
+                return errD
+
+            optimizerSND.step()
+        else:
+            errD.backward()
+            optimizerSND.step()
 
         ############################
         # (2) Update G network: maximize log(D(G(z)))
@@ -151,9 +172,26 @@ for epoch in range(opt.max_iter):
             output = SND(fake)
             errG = torch.mean(F.softplus(-output))
             #errG = criterion(output, labelv)
-            errG.backward()
+
             D_G_z2 = output.data.mean()
-            optimizerG.step()
+
+            if opt.optim == 'VAdam':
+                def closureG():
+                    optimizerG.zero_grad()
+                    errG = torch.mean(F.softplus(-output))
+                    errG.backward()
+                    return errD
+
+                optimizerG.step()
+            else:
+
+                errG.backward()
+                optimizerG.step()
+
+        # Log the error data
+        Gen_err.append(errG.data[0])
+        Dis_err.append(errD.data[0])
+
         if i % 20 == 0:
             print('[%3d/%3d][%3d/%3d] Loss_D: %.4f Loss_G: %.4f D(x): %+.4f D(G(z)): %+.4f / %+.4f'
                   % (epoch, 200, i, len(dataloader),
@@ -164,14 +202,27 @@ for epoch in range(opt.max_iter):
                     normalize=True)
             fake = G(fixed_noise)
             vutils.save_image(fake.data,
-                    '%s/fake_samples_%03d_epoch_%03d.png' % (save_result_path, i, epoch),
+                    '%s/fake_samples_epoch_%03d.png' % (save_result_path, epoch),
                     normalize=True)
 
 end_time = time()-start_time
 # do checkpointing
 torch.save(G.state_dict(), '%s/netG_epoch_%d.pth' % (save_model_path, epoch))
 torch.save(SND.state_dict(), '%s/netD_epoch_%d.pth' % (save_model_path, epoch))
+with open('Error_Generator.csv', 'wb') as myfile:
+    wr = csv.writer(myfile, quoting=csv.QUOTE_ALL)
+    wr.writerow(Gen_err)
 
+with open('Error_Discriminator.csv', 'wb') as myfile:
+    wr = csv.writer(myfile, quoting=csv.QUOTE_ALL)
+    wr.writerow(Dis_err)
 
 # Create Gif
-create_gif(save_result_path, "SNGAN_Adam", asset_path)
+create_gif(save_result_path, model_name, asset_path)
+
+plt.figure()
+plt.plot(np.linspace(0, len(Gen_err)), Gen_err)
+plt.plot(np.linspace(0, len(Dis_err)), Dis_err)
+plt.tight_layout()
+plt.savefig(asset_path + model_name+'_error_results.png', dpi=400, bbox_inches='tight')
+plt.show()

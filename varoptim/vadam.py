@@ -2,6 +2,7 @@ import math
 import torch
 from torch.optim.optimizer import Optimizer
 from torch.nn.utils import parameters_to_vector, vector_to_parameters
+from numpy import asarray
 
 #=================#
 # VADAM OPTIMIZER #
@@ -19,7 +20,7 @@ class VAdam(Optimizer):
         eps (float, optional): term added to the denominator to improve
             numerical stability (default: 1e-8)
 
-    References:
+    Reference(s):
         [1] "Fast and Scalable Bayesian Deep Learning by Weight-Perturbation in Adam"
             https://arxiv.org/abs/1806.04854
 
@@ -51,111 +52,73 @@ class VAdam(Optimizer):
                         init_precision = init_precision)
         super(VAdam,self).__init__(params,defaults)
 
-    def step(self, closure):
-        '''
-        Perform a single optimization step
+    def step(self, closure=None):
+        """Performs a single optimization step.
         Arguments:
-            closure(callable):A closure that reevaluates the model and
-                               returns the loss
-        '''
-
+            closure (callable, optional): A closure that reevaluates the model
+                and returns the loss.
+        """
         loss = None
-        # Create a place holder for gradients
-        grads = []
-        grads_sq = []
+        if closure is not None:
+            loss = closure()
+        t = 0
+
         for group in self.param_groups:
             for p in group['params']:
-                grads.append([])
-                grads_sq.append([])
 
-        for s in range(self.num_samples):
+                if p.grad is None:
+                    continue
+                grad = p.grad.data
 
-            # Initialization
-            t = 0
-            original_values = {}
-            for group in self.param_groups:
-                for p in group['params']:
+                if grad.is_sparse:
+                    raise RuntimeError('Adam does not support sparse gradients, please consider SparseAdam instead')
+                amsgrad = group['amsgrad']
 
-                    original_values.setdefault(t, p.detach().clone())
-                    state = self.state[p]
+                original_value = p.detach().clone()
+                state = self.state[p]
 
-                    # State initialization
-                    if len(state) == 0:
-                        state['step'] = 0
-                        # Exponential moving average of gradient values
-                        state['exp_avg'] = torch.zeros_like(p.data)
-                        # Exponential moving average of squared gradient values
-                        state['exp_avg_sq'] = torch.ones_like(p.data) * (
-                                    group['init_precision'] - group['prior_precision']) / self.train_batch_size
+                # State initialization
+                if len(state) == 0:
+                    state['step'] = 0
+                    # Exponential moving average of gradient values
+                    state['exp_avg'] = torch.zeros_like(p.data)
+                    # Exponential moving average of squared gradient values
+                    state['exp_avg_sq'] = torch.ones_like(p.data) * (group['init_precision'] -
+                                                                     group['prior_precision']) / self.train_batch_size
 
-                    # Sample noise for each parameter
-                    raw_noise = torch.normal(mean=torch.zeros_like(p.data), std=1.0)
-                    p.data.addcdiv_(1., raw_noise,
-                                    torch.sqrt(self.train_batch_size * state['exp_avg_sq'] + group['prior_precision']))
+                    if amsgrad:
+                        # Maintains max of all exp. moving avg. of sq. grad. values
+                        state['max_exp_avg_sq'] = torch.zeros_like(p.data)
 
-                    t += 1
+                # A noisy sample
+                raw_noise = torch.normal(mean=torch.zeros_like(p.data), std=1.0)
+                p.data.addcdiv_(1., raw_noise,
+                                torch.sqrt(self.train_set_size * state['exp_avg_sq'] + group['prior_prec']))
 
-            # Call the loss function and do BP to compute gradient
-            loss = closure()
+                tlambda = group['prior_precision'] / self.train_batch_size
 
-            # Accumulate Gradients with respect to each parameter for all samples
-            for group in self.param_groups:
-                for p in group['params']:
+                exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
+                if amsgrad:
+                    max_exp_avg_sq = state['max_exp_avg_sq']
+                beta1, beta2 = group['betas']
 
-                    p.data = original_values[t]
+                state['step'] += 1
 
-                    if p.grad is None:
-                        continue
+                # Decay the first and second moment running average coefficient
+                exp_avg.mul_(beta1).add_(1 - beta1, grad+ tlambda * original_value)
+                exp_avg_sq.mul_(beta2).addcmul_(1 - beta2, grad, grad)
+                if amsgrad:
+                    # Maintains the maximum of all 2nd moment running avg. till now
+                    torch.max(max_exp_avg_sq, exp_avg_sq, out=max_exp_avg_sq)
+                    # Use the max. for normalizing running avg. of gradient
+                    denom = max_exp_avg_sq.sqrt().add_(group['eps'])
+                else:
+                    denom = exp_avg_sq.sqrt().add(tlambda).add_(group['eps'])
 
-                    if p.grad.is_sparse:
-                        raise RuntimeError('VAdam currently does not support sparse gradients')
+                bias_correction1 = 1 - beta1 ** state['step']
+                bias_correction2 = 1 - beta2 ** state['step']
+                step_size = group['lr'] * math.sqrt(bias_correction2) / bias_correction1
 
-                    # Collect all the gradients and their squares
-                    if s == 0:
-                        grads[t] = p.grad.detach().clone()
-                        grads_sq[2] = grads[t]**2
-                    else:
-                        grads[t] += p.grad.detach().clone()
-                        grads_sq[2] += p.grad.detach().clone()**2
+                p.data.addcdiv_(-step_size, exp_avg, denom)
 
-                    t += 1
-
-            # The usual Adam optimizer procedure
-            t = 0
-            for group in self.param_groups:
-                for p in group['params']:
-
-                    grad = grads[t].div(self.num_samples)
-                    grad_sq = grads_sq[t].dic(self.num_samples)
-
-                    state = self.state[p]
-
-                    exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
-                    beta1, beta2 = group['betas']
-
-                    lambda_val = group['prior_precision']/self.train_batch_size
-
-                    # Decay the first and second moment running average coefficient
-                    exp_avg.mul_(beta1).add_(1 - beta1, grad + lambda_val*original_values[t])
-                    exp_avg_sq.mul_(beta2).addcmul_(1 - beta2, grad_sq)
-
-                    # Bias correction
-                    bias_correction1 = 1 - beta1 ** state['step']
-                    bias_correction2 = 1 - beta2 ** state['step']
-
-                    denominator = exp_avg_sq.div(bias_correction2).sqrt()
-                    denominator = denominator.add(lambda_val).add_(group['eps'])
-                    numerator = exp_avg.div(bias_correction1)
-
-                    # Update parameters
-                    p.data.addcdiv_(-group['lr'], numerator, denominator)
-
-                    t += 1
-                    state['step'] += 1
         return loss
-
-
-
-
-
-

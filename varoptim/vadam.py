@@ -54,25 +54,21 @@ class VAdam(Optimizer):
 
     def step(self, closure=None):
         """Performs a single optimization step.
+	        1) Perturb data with Gaussian noise
+	        2) Do backprop
+	        3) Get gradients of this perturbed data
+        4) Do steps 1-3 for N number of samples
+        5) Perform Adam as usual with the added precision factor (Store unperturbed data)
         Arguments:
             closure (callable, optional): A closure that reevaluates the model
                 and returns the loss.
         """
-        loss = None
+
         if closure is not None:
             loss = closure()
         t = 0
-
         for group in self.param_groups:
             for p in group['params']:
-
-                if p.grad is None:
-                    continue
-                grad = p.grad.data
-
-                if grad.is_sparse:
-                    raise RuntimeError('Adam does not support sparse gradients, please consider SparseAdam instead')
-                amsgrad = group['amsgrad']
 
                 original_value = p.detach().clone()
                 state = self.state[p]
@@ -83,42 +79,50 @@ class VAdam(Optimizer):
                     # Exponential moving average of gradient values
                     state['exp_avg'] = torch.zeros_like(p.data)
                     # Exponential moving average of squared gradient values
+                    #state['exp_avg_sq'] = torch.zeros_like(p.data)
                     state['exp_avg_sq'] = torch.ones_like(p.data) * (group['init_precision'] -
                                                                      group['prior_precision']) / self.train_batch_size
 
-                    if amsgrad:
-                        # Maintains max of all exp. moving avg. of sq. grad. values
-                        state['max_exp_avg_sq'] = torch.zeros_like(p.data)
 
-                # A noisy sample
-                raw_noise = torch.normal(mean=torch.zeros_like(p.data), std=1.0)
-                p.data.addcdiv_(1., raw_noise,
-                                torch.sqrt(self.train_set_size * state['exp_avg_sq'] + group['prior_prec']))
+                for s in range(self.num_samples):
+                    # A noisy sample
+                    raw_noise = torch.normal(mean=torch.zeros_like(p.data), std=1.0)
+                    p.data.addcdiv_(1., raw_noise,
+                                    torch.sqrt(self.train_batch_size * state['exp_avg_sq'] + group['prior_precision']))
+                    loss = None
+
+
+                    if p.grad is None:
+                        continue
+                    if s ==0:
+                        grad = p.grad.data
+                    else:
+                        grad += p.grad.data
+
+                grad.div(self.num_samples)
+
+                if grad.is_sparse:
+                    raise RuntimeError('Adam does not support sparse gradients, please consider SparseAdam instead')
 
                 tlambda = group['prior_precision'] / self.train_batch_size
 
                 exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
-                if amsgrad:
-                    max_exp_avg_sq = state['max_exp_avg_sq']
+
                 beta1, beta2 = group['betas']
 
                 state['step'] += 1
 
                 # Decay the first and second moment running average coefficient
-                exp_avg.mul_(beta1).add_(1 - beta1, grad+ tlambda * original_value)
+                exp_avg.mul_(beta1).add_(1 - beta1, grad + tlambda * original_value)
                 exp_avg_sq.mul_(beta2).addcmul_(1 - beta2, grad, grad)
-                if amsgrad:
-                    # Maintains the maximum of all 2nd moment running avg. till now
-                    torch.max(max_exp_avg_sq, exp_avg_sq, out=max_exp_avg_sq)
-                    # Use the max. for normalizing running avg. of gradient
-                    denom = max_exp_avg_sq.sqrt().add_(group['eps'])
-                else:
-                    denom = exp_avg_sq.sqrt().add(tlambda).add_(group['eps'])
 
                 bias_correction1 = 1 - beta1 ** state['step']
                 bias_correction2 = 1 - beta2 ** state['step']
+
+                denom = exp_avg_sq.sqrt().add(tlambda * math.sqrt(bias_correction2))
                 step_size = group['lr'] * math.sqrt(bias_correction2) / bias_correction1
 
                 p.data.addcdiv_(-step_size, exp_avg, denom)
+                t += 1
 
         return loss

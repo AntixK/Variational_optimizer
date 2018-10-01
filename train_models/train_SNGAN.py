@@ -19,18 +19,18 @@ from Variational_optimizer.models.GAN.SNGAN import _netG, _netD
 from Variational_optimizer.model_utils.weight_filler import weight_filler
 from Variational_optimizer.data_utils.logg import get_save_path
 from Variational_optimizer.data_utils.create_gif import create_gif
-from Variational_optimizer.varoptim.vadam import VAdam
-#from Variational_optimizer.varoptim.vadam_1 import VAdam
+#from Variational_optimizer.varoptim.vadam import VAdam
+from Variational_optimizer.varoptim.vadam_1 import VAdam
 import csv
 
 parser = argparse.ArgumentParser(description='train SNDCGAN model')
 parser.add_argument('--cuda', default=True, action='store_true', help='enables cuda')
 parser.add_argument('--gpu_ids', default=0, help='gpu ids: e.g. 0,1,2, 0,2.')
-parser.add_argument('--manualSeed', type=int, help='manual seed')
+parser.add_argument('--manualSeed', type=int, default=1943, help='manual seed')
 parser.add_argument('--n_dis', type=int, default=1, help='discriminator critic iters')
 parser.add_argument('--nz', type=int, default=128, help='dimention of lantent noise')
 parser.add_argument('--batchsize', type=int, default=64, help='training batch size')
-parser.add_argument('--max_iter', type=int, default=200, help='Maximum training iterations')
+parser.add_argument('--max_iter', type=int, default=2, help='Maximum training iterations')
 parser.add_argument('--optim', type=str, default='VAdam', help='Optimizer [Adam, VAdam]')
 opt = parser.parse_args()
 print(opt)
@@ -101,9 +101,11 @@ if opt.optim == 'Adam':
     optimizerSND = optim.Adam(SND.parameters(), lr=0.0002, betas=(0.5, 0.999))
 elif opt.optim == 'VAdam':
     optimizerG = VAdam(G.parameters(), lr=0.0002, betas=(0.5, 0.999),
-                       prior_precision=1.0, init_precision=1.0, train_batch_size=len(dataloader.dataset))
+                       prior_precision=1.0, init_precision=1.0,
+                       train_batch_size=len(dataloader.dataset), num_samples=10)
     optimizerSND = VAdam(SND.parameters(), lr=0.0002, betas=(0.5, 0.999),
-                         prior_precision=1.0, init_precision=1.0, train_batch_size=len(dataloader.dataset))
+                         prior_precision=1.0, init_precision=1.0,
+                         train_batch_size=len(dataloader.dataset), num_samples=10)
 print("Number of data points ",len(dataloader.dataset))
 print("Number of Generator Parameter", len(list(G.parameters())))
 print("Number of Discriminator Parameter", len(list(SND.parameters())))
@@ -152,13 +154,20 @@ for epoch in range(opt.max_iter):
         if opt.optim == 'VAdam':
             def closureSND():
                 optimizerSND.zero_grad()
+                output = SND(inputv)
+
                 errD_real = torch.mean(F.softplus(-output))
+
+                # train with fake
+                fake = G(noisev)
+                output = SND(fake.detach())
                 errD_fake = torch.mean(F.softplus(output))
+
                 errD = errD_real + errD_fake
                 errD.backward(retain_graph=True)
                 return errD
 
-            optimizerSND.step()
+            optimizerSND.step(closureSND)
         else:
             errD.backward()
             optimizerSND.step()
@@ -167,7 +176,7 @@ for epoch in range(opt.max_iter):
         # (2) Update G network: maximize log(D(G(z)))
         ###########################
         if step % n_dis == 0:
-            G.zero_grad()
+            optimizerG.zero_grad()
             labelv = Variable(label.fill_(real_label))  # fake labels are real for generator cost
             output = SND(fake)
             errG = torch.mean(F.softplus(-output))
@@ -178,11 +187,12 @@ for epoch in range(opt.max_iter):
             if opt.optim == 'VAdam':
                 def closureG():
                     optimizerG.zero_grad()
+                    output = SND(fake)
                     errG = torch.mean(F.softplus(-output))
-                    errG.backward()
+                    errG.backward(retain_graph=True)
                     return errD
 
-                optimizerG.step()
+                optimizerG.step(closureG)
             else:
 
                 errG.backward()
@@ -209,20 +219,21 @@ end_time = time()-start_time
 # do checkpointing
 torch.save(G.state_dict(), '%s/netG_epoch_%d.pth' % (save_model_path, epoch))
 torch.save(SND.state_dict(), '%s/netD_epoch_%d.pth' % (save_model_path, epoch))
-with open('Error_Generator.csv', 'wb') as myfile:
-    wr = csv.writer(myfile, quoting=csv.QUOTE_ALL)
-    wr.writerow(Gen_err)
 
-with open('Error_Discriminator.csv', 'wb') as myfile:
-    wr = csv.writer(myfile, quoting=csv.QUOTE_ALL)
-    wr.writerow(Dis_err)
+
+np.savetxt(save_model_path+"/Discriminator_error.csv", np.asarray(Dis_err), delimiter=",")
+np.savetxt(save_model_path+"/Generator_error.csv", np.asarray(Gen_err), delimiter=",")
 
 # Create Gif
 create_gif(save_result_path, model_name, asset_path)
 
 plt.figure()
-plt.plot(np.linspace(0, len(Gen_err)), Gen_err)
-plt.plot(np.linspace(0, len(Dis_err)), Dis_err)
+plt.plot(np.arange(0, len(Gen_err)), Gen_err, label= 'Generator Error')
+plt.plot(np.arange(0, len(Dis_err)), Dis_err, label='Discriminator Error')
+plt.ylabel('Error', fontsize=17)
+plt.xlabel('Iteration', fontsize=17)
+plt.legend(fontsize=17)
+plt.title(model_name+" Error Variation", fontsize=17)
 plt.tight_layout()
 plt.savefig(asset_path + model_name+'_error_results.png', dpi=400, bbox_inches='tight')
 plt.show()

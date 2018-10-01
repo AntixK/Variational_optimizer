@@ -27,7 +27,7 @@ class VAdam(Optimizer):
     """
 
     def __init__(self, params, train_batch_size, lr=1e-3, betas=(0.9, 0.999), prior_precision=1.0, init_precision=1.0,
-                 num_samples=1):
+                 num_samples=10):
         if not 0.0 <= lr:
             raise ValueError("Invalid learning rate: {}".format(lr))
         if not 0.0 <= prior_precision:
@@ -105,6 +105,7 @@ class VAdam(Optimizer):
                     p.data = original_values[pid]
 
                     if p.grad is None:
+                        pid = pid + 1
                         continue
 
                     if p.grad.is_sparse:
@@ -125,10 +126,11 @@ class VAdam(Optimizer):
         pid = 0
         for group in self.param_groups:
             for p in group['params']:
-
-                if grads[pid] is None:
+                #print(len(grads[pid]), grads[pid])
+                if len(grads[pid]) == 0:
+                    pid = pid + 1
                     continue
-
+                #
                 # Compute MC estimate of g and g2
                 grad = grads[pid].div(self.num_samples)
                 grad2 = grads2[pid].div(self.num_samples)
@@ -142,7 +144,6 @@ class VAdam(Optimizer):
                 beta1, beta2 = group['betas']
 
                 state['step'] += 1
-
                 # Decay the first and second moment running average coefficient
                 exp_avg.mul_(beta1).add_(1 - beta1, grad + tlambda * original_values[pid])
                 exp_avg_sq.mul_(beta2).add_(1 - beta2, grad2)

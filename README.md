@@ -4,9 +4,9 @@ Experiments on Using Variational Optimizers on DNNs
 #### Usage
 
 #### Requirements
-- Pytorch
-- CUDA
-- CUDNN
+- Pytorch - 0.4.1
+- CUDA    - 8.0.0
+- CUDNN   - 7
 - imageio
 ```python
 conda install -c conda-forge imageio

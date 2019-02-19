@@ -1,5 +1,5 @@
 # variational-optimizers
-Experiments on Using Variational Optimizers on DNNs
+Experiments on Using Variational Optimizers on DNNs. As of now, only the Variational ADAM (VADAM) has been implemented. Other optimizers like VOGN and VadaGrad are yet to be written. Stay Tuned!
 
 #### Usage
 
